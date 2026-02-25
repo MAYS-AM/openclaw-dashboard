@@ -2211,14 +2211,15 @@ async function handleRegister(event) {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ username, password })
     });
-    
-    const data = await res.json();
-    
+
+    var data = {};
+    try { data = await res.json(); } catch (e) { data = {}; }
+
     if (res.ok && data.success) {
       setStoredToken(data.sessionToken, false);
       showApp();
     } else {
-      registerError.textContent = data.error || 'Registration failed';
+      registerError.textContent = data.error || ('Registration failed (' + res.status + ')');
       registerError.style.display = 'block';
       registerBtn.disabled = false;
       registerBtn.textContent = 'Create Account';
@@ -2261,9 +2262,10 @@ async function handleLogin(event) {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body)
     });
-    
-    const data = await res.json();
-    
+
+    var data = {};
+    try { data = await res.json(); } catch (e) { data = {}; }
+
     if (data.requiresMfa) {
       document.getElementById('authSubtitle').textContent = 'Enter your 6-digit TOTP code';
       document.getElementById('usernameInputContainer').style.display = 'none';
@@ -2334,14 +2336,15 @@ async function handleRecovery(event) {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ recoveryToken, newPassword })
     });
-    
-    const data = await res.json();
-    
+
+    var data = {};
+    try { data = await res.json(); } catch (e) { data = {}; }
+
     if (res.ok && data.success) {
       showToast('Password reset successfully! Please login.', 'success');
       showLoginForm();
     } else {
-      recoveryError.textContent = data.error || 'Password reset failed';
+      recoveryError.textContent = data.error || ('Password reset failed (' + res.status + ')');
       recoveryError.style.display = 'block';
       recoveryBtn.disabled = false;
       recoveryBtn.textContent = 'Reset Password';
