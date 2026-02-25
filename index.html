@@ -3876,33 +3876,30 @@ function updateLimits() {
   document.getElementById('windowResetValue').textContent = resetIn > 0 ? formatMs(resetIn) : 'No window';
   document.getElementById('windowResetSub').textContent = (usage.fiveHour && usage.fiveHour.windowStart) ? 'Since ' + new Date(usage.fiveHour.windowStart).toLocaleTimeString('en', {hour:'2-digit',minute:'2-digit'}) : '';
 
-  const pricing = {
-    opus: { input: 15, output: 75, cache: 1.875 },
-    sonnet: { input: 3, output: 15, cache: 0.375 }
-  };
-
-  const windowHtml = Object.entries(models)
-    .sort((a, b) => b[1].output - a[1].output)
-    .map(([model, data]) => {
-      const shortModel = model.split('/').pop();
-      const isOpus = model.includes('opus');
-      const isSonnet = model.includes('sonnet');
-      const p = isOpus ? pricing.opus : isSonnet ? pricing.sonnet : { input: 0, output: 0, cache: 0 };
-      const inputCost = (data.input || 0) / 1000000 * p.input;
-      const outputCost = (data.output || 0) / 1000000 * p.output;
-      const totalModelCost = inputCost + outputCost;
-      return `
-        <div style="margin-bottom:20px;padding-bottom:16px;border-bottom:1px solid var(--border);">
-          <div style="display:flex;justify-content:space-between;margin-bottom:6px;">
-            <span class="mono" style="font-size:14px;font-weight:600;">${shortModel}</span>
-            <span class="mono" style="font-size:14px;font-weight:600;color:var(--accent);">$${totalModelCost.toFixed(4)}</span>
-          </div>
-          <div style="display:flex;gap:16px;font-size:11px;color:var(--text-muted);font-family:'JetBrains Mono',monospace;">
-            <span>${data.calls} calls</span>
-            <span>${(data.input/1000).toFixed(0)}k in ($${inputCost.toFixed(4)})</span>
-            <span>${(data.output/1000).toFixed(0)}k out ($${outputCost.toFixed(4)})</span>
-          </div>
-        </div>`;
+  var windowHtml = Object.entries(models)
+    .sort(function(a, b) { return b[1].output - a[1].output; })
+    .map(function(entry) {
+      var model = entry[0], data = entry[1];
+      var shortModel = model.split('/').pop();
+      var calc = (usage.fiveHour && usage.fiveHour.perModelCost && usage.fiveHour.perModelCost[model]) || {};
+      var inputCost = calc.inputCost || 0;
+      var outputCost = calc.outputCost || 0;
+      var cacheReadCost = calc.cacheReadCost || 0;
+      var cacheWriteCost = calc.cacheWriteCost || 0;
+      var totalModelCost = calc.totalCost || (inputCost + outputCost + cacheReadCost + cacheWriteCost);
+      var cacheCost = cacheReadCost + cacheWriteCost;
+      return '<div style="margin-bottom:20px;padding-bottom:16px;border-bottom:1px solid var(--border);">' +
+          '<div style="display:flex;justify-content:space-between;margin-bottom:6px;">' +
+            '<span class="mono" style="font-size:14px;font-weight:600;">' + shortModel + '</span>' +
+            '<span class="mono" style="font-size:14px;font-weight:600;color:var(--accent);">$' + totalModelCost.toFixed(4) + '</span>' +
+          '</div>' +
+          '<div style="display:flex;gap:16px;font-size:11px;color:var(--text-muted);font-family:\'JetBrains Mono\',monospace;">' +
+            '<span>' + data.calls + ' calls</span>' +
+            '<span>' + (data.input/1000).toFixed(0) + 'k in ($' + inputCost.toFixed(4) + ')</span>' +
+            '<span>' + (data.output/1000).toFixed(0) + 'k out ($' + outputCost.toFixed(4) + ')</span>' +
+            (cacheCost > 0 ? '<span>cache ($' + cacheCost.toFixed(4) + ')</span>' : '') +
+          '</div>' +
+        '</div>';
     }).join('');
 
   document.getElementById('windowBreakdown').innerHTML = windowHtml || '<div class="empty-state-text">No data</div>';

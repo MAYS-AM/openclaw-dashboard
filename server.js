@@ -31,8 +31,92 @@ const claudeUsageFile = path.join(dataDir, 'claude-usage.json');
 const geminiUsageFile = path.join(dataDir, 'gemini-usage.json');
 const scrapeScript = path.join(WORKSPACE_DIR, 'scripts', 'scrape-claude-usage.sh');
 const geminiScrapeScript = path.join(WORKSPACE_DIR, 'scripts', 'scrape-gemini-usage.sh');
+const pricingFile = path.join(WORKSPACE_DIR, 'data', 'model_pricing_usd_per_million.json');
 
 const htmlPath = path.join(__dirname, 'index.html');
+
+const DEFAULT_MODEL_PRICING = {
+  'openai/gpt-4o-mini': { input: 0.15, output: 0.60, cacheRead: 0.075, cacheWrite: 0.30 },
+  'openai/gpt-4.1-mini': { input: 0.40, output: 1.60, cacheRead: 0.20, cacheWrite: 0.80 },
+  'anthropic/claude-sonnet-4-5': { input: 3.00, output: 15.00, cacheRead: 0.30, cacheWrite: 3.75 },
+  'anthropic/claude-3-5-haiku-latest': { input: 0.80, output: 4.00, cacheRead: 0.08, cacheWrite: 1.00 },
+  'google/gemini-3-flash-preview': { input: 0.50, output: 3.00, cacheRead: 0.05, cacheWrite: 0.50 },
+  'xai/grok-4-1-fast': { input: 0.20, output: 0.50, cacheRead: 0.05, cacheWrite: 0.20 },
+  'nvidia/moonshotai/kimi-k2.5': { input: 0.00, output: 0.00, cacheRead: 0.00, cacheWrite: 0.00 }
+};
+
+function toNum(v) {
+  const n = Number(v);
+  return Number.isFinite(n) ? n : 0;
+}
+
+function normalizeProvider(provider) {
+  return String(provider || 'unknown').trim().toLowerCase();
+}
+
+function normalizeModel(provider, model) {
+  const p = normalizeProvider(provider);
+  let m = String(model || 'unknown').trim();
+  const pref = p + '/';
+  if (m.toLowerCase().startsWith(pref)) m = m.slice(pref.length);
+  const ml = m.toLowerCase();
+  if (p === 'anthropic') {
+    if (ml.startsWith('claude-sonnet-4-5')) return 'claude-sonnet-4-5';
+    if (ml.startsWith('claude-3-5-haiku')) return 'claude-3-5-haiku-latest';
+  }
+  if (p === 'openai') {
+    if (ml.startsWith('gpt-4o-mini')) return 'gpt-4o-mini';
+    if (ml.startsWith('gpt-4.1-mini')) return 'gpt-4.1-mini';
+  }
+  if (p === 'google' && ml.startsWith('gemini-3-flash-preview')) return 'gemini-3-flash-preview';
+  if (p === 'xai' && ml.startsWith('grok-4-1-fast')) return 'grok-4-1-fast';
+  if (p === 'nvidia' && ml.includes('kimi-k2.5')) return 'moonshotai/kimi-k2.5';
+  return m;
+}
+
+function loadModelPricing() {
+  try {
+    if (!fs.existsSync(pricingFile)) return { ...DEFAULT_MODEL_PRICING };
+    const parsed = JSON.parse(fs.readFileSync(pricingFile, 'utf8'));
+    const rates = parsed && parsed.rates_usd_per_million;
+    if (!rates || typeof rates !== 'object') return { ...DEFAULT_MODEL_PRICING };
+    const out = {};
+    for (const [k, v] of Object.entries(rates)) {
+      if (!k.includes('/') || !v || typeof v !== 'object') continue;
+      out[String(k)] = {
+        input: toNum(v.input),
+        output: toNum(v.output),
+        cacheRead: toNum(v.cacheRead),
+        cacheWrite: toNum(v.cacheWrite)
+      };
+    }
+    return Object.keys(out).length ? out : { ...DEFAULT_MODEL_PRICING };
+  } catch {
+    return { ...DEFAULT_MODEL_PRICING };
+  }
+}
+
+const MODEL_PRICING = loadModelPricing();
+
+function estimateMsgCost(msg) {
+  const usage = msg && msg.usage ? msg.usage : {};
+  const explicit = toNum(usage.cost && usage.cost.total);
+  if (explicit > 0) return explicit;
+  const provider = normalizeProvider(msg && msg.provider);
+  const modelNorm = normalizeModel(provider, msg && msg.model);
+  const rates = MODEL_PRICING[`${provider}/${modelNorm}`];
+  if (!rates) return 0;
+  const input = Math.max(0, toNum(usage.input)) / 1_000_000;
+  const output = Math.max(0, toNum(usage.output)) / 1_000_000;
+  const cacheRead = Math.max(0, toNum(usage.cacheRead)) / 1_000_000;
+  const cacheWrite = Math.max(0, toNum(usage.cacheWrite)) / 1_000_000;
+  return (
+    input * toNum(rates.input) +
+    output * toNum(rates.output) +
+    cacheRead * toNum(rates.cacheRead) +
+    cacheWrite * toNum(rates.cacheWrite)
+  );
+}
 
 try { fs.mkdirSync(dataDir, { recursive: true }); } catch {}
 try { fs.mkdirSync(path.dirname(auditLogPath), { recursive: true }); } catch {}
@@ -416,7 +500,7 @@ function getSessionCost(sessionId) {
           try {
             const d = JSON.parse(line);
             if (d.type !== 'message') continue;
-            const c = d.message?.usage?.cost?.total || 0;
+            const c = estimateMsgCost(d.message || {});
             if (c > 0) total += c;
           } catch {}
         }
@@ -468,14 +552,16 @@ function getCostData() {
           const d = JSON.parse(line);
           if (d.type !== 'message') continue;
           const msg = d.message;
-          if (!msg || !msg.usage || !msg.usage.cost) continue;
-          const c = msg.usage.cost.total || 0;
+          if (!msg || !msg.usage) continue;
+          const c = estimateMsgCost(msg);
           if (c <= 0) continue;
-          const model = msg.model || 'unknown';
+          const provider = normalizeProvider(msg.provider);
+          const model = normalizeModel(provider, msg.model);
           if (model.includes('delivery-mirror')) continue;
           const ts = d.timestamp || '';
           const day = ts.substring(0, 10);
-          perModel[model] = (perModel[model] || 0) + c;
+          const modelKey = `${provider}/${model}`;
+          perModel[modelKey] = (perModel[modelKey] || 0) + c;
           perDay[day] = (perDay[day] || 0) + c;
           scost += c;
           total += c;
@@ -588,27 +674,35 @@ function getUsageWindows() {
           if (!msg || !msg.usage) continue;
           const ts = d.timestamp ? new Date(d.timestamp).getTime() : 0;
           if (!ts) continue;
-          const model = msg.model || 'unknown';
-          const inTok = (msg.usage.input || 0) + (msg.usage.cacheRead || 0) + (msg.usage.cacheWrite || 0);
-          const outTok = msg.usage.output || 0;
-          const cost = msg.usage.cost ? msg.usage.cost.total || 0 : 0;
+          const provider = normalizeProvider(msg.provider);
+          const model = normalizeModel(provider, msg.model);
+          const modelKey = `${provider}/${model}`;
+          const inTok = Math.max(0, toNum(msg.usage.input));
+          const outTok = Math.max(0, toNum(msg.usage.output));
+          const cacheReadTok = Math.max(0, toNum(msg.usage.cacheRead));
+          const cacheWriteTok = Math.max(0, toNum(msg.usage.cacheWrite));
+          const cost = estimateMsgCost(msg);
 
           if (now - ts < fiveHoursMs) {
-            if (!perModel5h[model]) perModel5h[model] = { input: 0, output: 0, cost: 0, calls: 0 };
-            perModel5h[model].input += inTok;
-            perModel5h[model].output += outTok;
-            perModel5h[model].cost += cost;
-            perModel5h[model].calls++;
+            if (!perModel5h[modelKey]) perModel5h[modelKey] = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, calls: 0 };
+            perModel5h[modelKey].input += inTok;
+            perModel5h[modelKey].output += outTok;
+            perModel5h[modelKey].cacheRead += cacheReadTok;
+            perModel5h[modelKey].cacheWrite += cacheWriteTok;
+            perModel5h[modelKey].cost += cost;
+            perModel5h[modelKey].calls++;
           }
           if (now - ts < oneWeekMs) {
-            if (!perModelWeek[model]) perModelWeek[model] = { input: 0, output: 0, cost: 0, calls: 0 };
-            perModelWeek[model].input += inTok;
-            perModelWeek[model].output += outTok;
-            perModelWeek[model].cost += cost;
-            perModelWeek[model].calls++;
+            if (!perModelWeek[modelKey]) perModelWeek[modelKey] = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, calls: 0 };
+            perModelWeek[modelKey].input += inTok;
+            perModelWeek[modelKey].output += outTok;
+            perModelWeek[modelKey].cacheRead += cacheReadTok;
+            perModelWeek[modelKey].cacheWrite += cacheWriteTok;
+            perModelWeek[modelKey].cost += cost;
+            perModelWeek[modelKey].calls++;
           }
           if (now - ts < fiveHoursMs) {
-            recentMessages.push({ ts, model, input: inTok, output: outTok, cost });
+            recentMessages.push({ ts, model: modelKey, input: inTok, output: outTok, cacheRead: cacheReadTok, cacheWrite: cacheWriteTok, cost });
           }
         } catch {}
       }
@@ -646,15 +740,20 @@ function getUsageWindows() {
 
     const perModelCost5h = {};
     for (const [model, data] of Object.entries(perModel5h)) {
-      const isOpus = model.includes('opus');
-      const isSonnet = model.includes('sonnet');
-      let inputPrice = 0, outputPrice = 0, cachePrice = 0;
-      if (isOpus) { inputPrice = 15; outputPrice = 75; cachePrice = 1.875; }
-      else if (isSonnet) { inputPrice = 3; outputPrice = 15; cachePrice = 0.375; }
+      const slash = model.indexOf('/');
+      const provider = slash >= 0 ? model.slice(0, slash) : 'unknown';
+      const modelName = slash >= 0 ? model.slice(slash + 1) : model;
+      const rates = MODEL_PRICING[`${provider}/${modelName}`] || {};
+      const inputCost = (data.input || 0) / 1000000 * toNum(rates.input);
+      const outputCost = (data.output || 0) / 1000000 * toNum(rates.output);
+      const cacheReadCost = (data.cacheRead || 0) / 1000000 * toNum(rates.cacheRead);
+      const cacheWriteCost = (data.cacheWrite || 0) / 1000000 * toNum(rates.cacheWrite);
       perModelCost5h[model] = {
-        inputCost: (data.input || 0) / 1000000 * inputPrice,
-        outputCost: (data.output || 0) / 1000000 * outputPrice,
-        totalCost: data.cost || 0
+        inputCost,
+        outputCost,
+        cacheReadCost,
+        cacheWriteCost,
+        totalCost: data.cost || (inputCost + outputCost + cacheReadCost + cacheWriteCost)
       };
     }
 
@@ -2108,7 +2207,7 @@ const server = http.createServer((req, res) => {
                 const inTok = (msg.usage.input || 0) + (msg.usage.cacheRead || 0) + (msg.usage.cacheWrite || 0);
                 const outTok = msg.usage.output || 0;
                 totalTokens += inTok + outTok;
-                totalCost += msg.usage.cost?.total || 0;
+                totalCost += estimateMsgCost(msg);
               }
               if (d.timestamp) {
                 const ts = new Date(d.timestamp).getTime();
