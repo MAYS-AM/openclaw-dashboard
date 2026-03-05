@@ -1555,10 +1555,15 @@ body.light-theme ::selection { background: rgba(99,102,241,0.2); }
           </div>
           <div class="system-metric">
             <div style="text-align: center; padding-top: 20px;">
-              <div style="font-size: 28px; font-weight: 700; font-family: 'JetBrains Mono', monospace; margin-bottom: 4px;" id="systemCrashesToday">0</div>
-              <div style="font-size: 11px; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 8px;">TODAY</div>
-              <div style="font-size: 18px; font-weight: 600; font-family: 'JetBrains Mono', monospace; margin-bottom: 4px;" id="systemCrashes">0</div>
-              <div style="font-size: 10px; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.05em;">7-DAY</div>
+              <div style="font-size: 11px; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 6px;">💥 Crashes</div>
+              <div style="display:flex;align-items:center;justify-content:center;gap:6px;margin-bottom:4px;">
+                <div style="font-size: 28px; font-weight: 700; font-family: 'JetBrains Mono', monospace;" id="systemCrashesToday">0</div>
+                <div style="font-size: 10px; color: var(--text-muted); text-transform: uppercase;">today</div>
+              </div>
+              <div style="display:flex;align-items:center;justify-content:center;gap:6px;">
+                <div style="font-size: 18px; font-weight: 600; font-family: 'JetBrains Mono', monospace;" id="systemCrashes">0</div>
+                <div style="font-size: 10px; color: var(--text-muted); text-transform: uppercase;">7-day</div>
+              </div>
             </div>
           </div>
         </div>
@@ -4603,14 +4608,17 @@ window.runCronJob = async function(id) {
       </div>`;
     }).join('') || '<div class="empty-state-text">No recent commits</div>';
 
-    document.getElementById('memoryFiles').innerHTML = memFiles.map(f => {
+    const memLimit = 5;
+    const memHtml = memFiles.map((f, idx) => {
       const age = now - f.modified;
       const ago = age < 60000 ? 'just now' : age < 3600000 ? Math.round(age/60000)+'m ago' : age < 86400000 ? Math.round(age/3600000)+'h ago' : Math.round(age/86400000)+'d ago';
-      return `<div style="display:flex;justify-content:space-between;padding:12px 0;border-bottom:1px solid var(--border);">
+      return `<div class="mem-file-item" style="display:flex;justify-content:space-between;padding:12px 0;border-bottom:1px solid var(--border);${idx >= memLimit ? 'display:none;' : ''}">
         <span class="mono" style="font-size:13px;">📄 ${f.name}</span>
         <span style="font-size:12px;color:var(--text-muted);">${ago}</span>
       </div>`;
     }).join('') || '<div class="empty-state-text">No files</div>';
+    const showMoreBtn = memFiles.length > memLimit ? `<div id="memShowMore" style="text-align:center;padding:10px 0;cursor:pointer;color:var(--accent);font-size:13px;font-weight:500;" onclick="document.querySelectorAll('.mem-file-item').forEach(e=>e.style.display='flex');this.style.display='none';">Show all (${memFiles.length} files) ↓</div>` : '';
+    document.getElementById('memoryFiles').innerHTML = memHtml + showMoreBtn;
 
     const inK = (tokens.totalInput / 1000).toFixed(0) + 'k';
     const outK = (tokens.totalOutput / 1000).toFixed(0) + 'k';
@@ -5027,7 +5035,7 @@ function renderDiskSparkline(history) {
     const y = h - ((v - min) / range) * h;
     return `${x},${y}`;
   }).join(' ');
-  el.innerHTML = `<svg width="${w}" height="${h}" viewBox="0 0 ${w} ${h}"><polyline points="${points}" fill="none" stroke="var(--purple)" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg><div style="font-size:9px;color:var(--text-muted);margin-top:2px;">DISK TREND</div>`;
+  el.innerHTML = `<svg width="${w}" height="${h}" viewBox="0 0 ${w} ${h}"><polyline points="${points}" fill="none" stroke="var(--purple)" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
 }
 
 const origUpdateOverview = updateOverview;
