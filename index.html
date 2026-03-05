@@ -1017,6 +1017,66 @@ body {
   color: var(--red);
 }
 
+.notification-badge {
+  position: absolute;
+  top: -2px;
+  right: -2px;
+  min-width: 16px;
+  height: 16px;
+  background: var(--red);
+  border-radius: 8px;
+  font-size: 10px;
+  font-weight: 700;
+  color: #fff;
+  display: none;
+  align-items: center;
+  justify-content: center;
+  padding: 0 4px;
+}
+.notif-panel {
+  position: fixed;
+  top: 60px;
+  right: 16px;
+  width: 380px;
+  max-height: 500px;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  box-shadow: 0 8px 24px rgba(0,0,0,0.3);
+  z-index: 300;
+  display: none;
+  flex-direction: column;
+  overflow: hidden;
+}
+.notif-panel-header {
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-weight: 600;
+  font-size: 14px;
+}
+.notif-panel-body {
+  overflow-y: auto;
+  max-height: 440px;
+  padding: 0;
+}
+.notif-item {
+  padding: 10px 16px;
+  border-bottom: 1px solid var(--border);
+  font-size: 12px;
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+}
+.notif-item:last-child { border-bottom: none; }
+.notif-item:hover { background: var(--bg-secondary); }
+.notif-icon { font-size: 16px; flex-shrink: 0; }
+.notif-content { flex: 1; }
+.notif-time { font-size: 10px; color: var(--text-muted); margin-top: 2px; }
+.notif-event { color: var(--text-primary); }
+body.light-theme .notif-panel { background: #ffffff; border-color: #d1d1d6; box-shadow: 0 8px 24px rgba(0,0,0,0.1); }
 /* Keyboard shortcuts overlay */
 .shortcuts-overlay {
   display: none;
@@ -2154,7 +2214,11 @@ body.light-theme ::selection { background: rgba(99,102,241,0.2); }
 
 <div class="toast-container" id="toastContainer"></div>
 
-<div class="notification-bell" id="notificationBell" title="Click to enable notifications">🔔</div>
+<div class="notification-bell" id="notificationBell" onclick="toggleNotifPanel()" title="Notifications">🔔<span class="notification-badge" id="notifBadge">0</span></div>
+<div class="notif-panel" id="notifPanel">
+  <div class="notif-panel-header"><span>Notifications</span><button onclick="toggleNotifPanel()" style="background:none;border:none;color:var(--text-muted);cursor:pointer;font-size:16px;">✕</button></div>
+  <div class="notif-panel-body" id="notifPanelBody"><div style="padding:20px;text-align:center;color:var(--text-muted);">Loading...</div></div>
+</div>
 
 <div class="shortcuts-overlay" id="shortcutsOverlay" onclick="if(event.target===this)toggleShortcuts()">
   <div class="shortcuts-panel">
@@ -4830,43 +4894,8 @@ function toggleShortcuts(force) {
 }
 
 // Browser notifications
-const bell = document.getElementById('notificationBell');
-if (bell) {
-  if (Notification.permission === 'granted') {
-    bell.classList.add('granted');
-    notificationsEnabled = true;
-  } else if (Notification.permission === 'denied') {
-    bell.classList.add('denied');
-  }
-  
-  bell.addEventListener('click', async () => {
-    if (typeof Notification === 'undefined') {
-      showToast('Browser notifications not supported', 'warning');
-      return;
-    }
-    if (Notification.permission === 'granted') {
-      notificationsEnabled = !notificationsEnabled;
-      bell.style.opacity = notificationsEnabled ? '1' : '0.5';
-      showToast(notificationsEnabled ? '🔔 Notifications ON' : '🔕 Notifications OFF', 'info');
-      if (notificationsEnabled) {
-        try { new Notification('Agent Dashboard', { body: 'Notifications enabled' }); } catch {}
-      }
-    } else if (Notification.permission === 'denied') {
-      showToast('Notifications blocked by browser. Check site permissions.', 'warning');
-    } else {
-      showToast('Requesting notification permission...', 'info');
-      const permission = await Notification.requestPermission();
-      if (permission === 'granted') {
-        bell.classList.add('granted');
-        notificationsEnabled = true;
-        showToast('🔔 Notifications enabled!', 'success');
-        try { new Notification('Agent Dashboard', { body: 'Notifications enabled!' }); } catch {}
-      } else {
-        bell.classList.add('denied');
-        showToast('Notifications denied', 'warning');
-      }
-    }
-  });
+if (typeof Notification !== 'undefined' && Notification.permission === 'granted') {
+  notificationsEnabled = true;
 }
 
 function sendNotification(title, body) {
@@ -5581,6 +5610,62 @@ async function loadDocker() {
     document.getElementById('dockerSystem').textContent = data.system || 'N/A';
   } catch(e) { showToast('Docker fetch error: ' + e.message, 'warning'); }
 }
+
+const notifIcons = {
+  login_success: '✅', login_failed: '❌', login_locked: '🔒', logout: '👋',
+  register: '📝', reauth_success: '🔓', reauth_failed: '🚫',
+  config_saved: '⚙️', config_read: '📖', docker_view: '🐳', docker_action: '🐳',
+  sys_security_view: '🛡️', auth_failed: '⚠️', login_mfa_failed: '🔑',
+  password_changed: '🔐', mfa_enabled: '📱', mfa_disabled: '📱'
+};
+let notifLastSeen = localStorage.getItem('notifLastSeen') || '';
+
+function toggleNotifPanel() {
+  const panel = document.getElementById('notifPanel');
+  if (panel.style.display === 'flex') { panel.style.display = 'none'; return; }
+  panel.style.display = 'flex';
+  fetchNotifications();
+}
+
+async function fetchNotifications() {
+  try {
+    const res = await authFetch(API_BASE + '/api/notifications?limit=50');
+    const data = await res.json();
+    const body = document.getElementById('notifPanelBody');
+    if (!data.events || !data.events.length) { body.innerHTML = '<div style="padding:20px;text-align:center;color:var(--text-muted);">No events yet</div>'; return; }
+    body.innerHTML = data.events.map(e => {
+      const icon = notifIcons[e.event] || '📋';
+      const time = e.timestamp ? new Date(e.timestamp).toLocaleString() : '';
+      const detail = e.username ? ' (' + e.username + ')' : '';
+      const ip = e.ip ? ' from ' + e.ip : '';
+      return '<div class="notif-item"><div class="notif-icon">' + icon + '</div><div class="notif-content"><div class="notif-event">' + (e.event||'').replace(/_/g, ' ') + detail + ip + '</div><div class="notif-time">' + time + '</div></div></div>';
+    }).join('');
+    if (data.events.length) {
+      notifLastSeen = data.events[0].timestamp;
+      localStorage.setItem('notifLastSeen', notifLastSeen);
+      document.getElementById('notifBadge').style.display = 'none';
+    }
+  } catch(e) { showToast('Notification fetch error: ' + e.message, 'warning'); }
+}
+
+async function checkNewNotifications() {
+  try {
+    const res = await authFetch(API_BASE + '/api/notifications?limit=5');
+    const data = await res.json();
+    if (data.events && data.events.length && notifLastSeen) {
+      const newCount = data.events.filter(e => e.timestamp > notifLastSeen).length;
+      const badge = document.getElementById('notifBadge');
+      if (newCount > 0) { badge.textContent = newCount; badge.style.display = 'flex'; }
+    }
+  } catch {}
+}
+setInterval(checkNewNotifications, 30000);
+setTimeout(checkNewNotifications, 3000);
+document.addEventListener('click', (e) => {
+  const panel = document.getElementById('notifPanel');
+  const bell = document.getElementById('notificationBell');
+  if (panel.style.display === 'flex' && !panel.contains(e.target) && !bell.contains(e.target)) panel.style.display = 'none';
+});
 
 async function dockerAction(action, id) {
   const label = action === 'prune-containers' ? 'prune stopped containers' : action === 'prune-images' ? 'prune unused images' : action + ' ' + id;

@@ -2036,6 +2036,18 @@ const server = http.createServer((req, res) => {
       });
       return;
     }
+    if (req.url.startsWith('/api/notifications')) {
+      if (!requireAuth(req, res)) return;
+      const limit = parseInt(new URL(req.url, 'http://localhost').searchParams.get('limit') || '50');
+      try {
+        const raw = fs.readFileSync(auditLogPath, 'utf8').trim();
+        const lines = raw.split('\n').filter(Boolean).slice(-Math.min(limit, 200));
+        const events = lines.map(l => { try { return JSON.parse(l); } catch { return null; } }).filter(Boolean).reverse();
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ events }));
+      } catch(e) { res.writeHead(200, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ events: [] })); }
+      return;
+    }
     if (req.url === '/api/docker') {
       if (!requireAuth(req, res)) return;
       const { execSync } = require('child_process');
