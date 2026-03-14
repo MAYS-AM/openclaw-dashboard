@@ -103,6 +103,11 @@ function loadModelPricing() {
 }
 
 const MODEL_PRICING = loadModelPricing();
+const BACKGROUND_TASK_REGEX = /background task\s+"([^"]+)"/i;
+const TASK_COMPLETE_REGEX = /(finished|completed|done|status update|report(?:ing)? back|all set|resolved)/i;
+const TASK_APPROVAL_BLOCK_REGEX = /(\/approve|approval required|awaiting approval|pending approval)/i;
+const TASK_RATE_LIMIT_BLOCK_REGEX = /(rate[_\s-]?limit|\b429\b|overloaded)/i;
+const TASK_STALE_MS = 5 * 60 * 1000;
 
 function estimateMsgCost(msg) {
   const usage = msg && msg.usage ? msg.usage : {};
@@ -484,6 +489,117 @@ function getLastMessage(sessionId) {
   } catch { return ''; }
 }
 
+function extractTextFromMessageContent(content) {
+  if (typeof content === 'string') return content;
+  if (Array.isArray(content)) {
+    for (const block of content) {
+      if (block && block.type === 'text' && block.text) return String(block.text);
+    }
+  }
+  return '';
+}
+
+function findSessionFileById(sessionId) {
+  try {
+    if (!sessionId || sessionId === '-') return null;
+    const exact = path.join(sessDir, sessionId + '.jsonl');
+    if (fs.existsSync(exact)) return exact;
+    const files = fs.readdirSync(sessDir).filter(f => isSessionFile(f));
+    const exactByExtract = files.find(f => extractSessionId(f) === sessionId);
+    if (exactByExtract) return path.join(sessDir, exactByExtract);
+    const partial = files.find(f => f.includes(sessionId));
+    if (partial) return path.join(sessDir, partial);
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+function getSessionTaskState(sessionId, fallbackUpdatedAt) {
+  const empty = {
+    taskState: 'none',
+    taskTitle: '',
+    taskSinceTs: 0,
+    taskAgeMs: 0,
+    taskBlockedReason: ''
+  };
+
+  try {
+    const filePath = findSessionFileById(sessionId);
+    if (!filePath) return empty;
+
+    const lines = fs.readFileSync(filePath, 'utf8').split('\n').filter(l => l.trim());
+    if (!lines.length) return empty;
+
+    const tail = lines.slice(-400);
+    let kickoff = null;
+    let blockedReason = '';
+    let completedAfterKickoff = false;
+
+    for (const line of tail) {
+      try {
+        const d = JSON.parse(line);
+        if (d.type !== 'message' || !d.message) continue;
+        const msg = d.message;
+        const text = extractTextFromMessageContent(msg.content);
+        const ts = d.timestamp ? new Date(d.timestamp).getTime() : 0;
+
+        const kickoffMatch = text.match(BACKGROUND_TASK_REGEX);
+        if (kickoffMatch) {
+          kickoff = {
+            title: (kickoffMatch[1] || '').trim(),
+            ts
+          };
+          blockedReason = '';
+          completedAfterKickoff = false;
+          continue;
+        }
+
+        if (!kickoff) continue;
+
+        const stopReason = String(msg.stopReason || '').toLowerCase();
+        if (stopReason === 'rate_limit' || TASK_RATE_LIMIT_BLOCK_REGEX.test(text)) {
+          blockedReason = 'rate_limit';
+        }
+        if (TASK_APPROVAL_BLOCK_REGEX.test(text)) {
+          blockedReason = blockedReason || 'approval';
+        }
+
+        const role = String(msg.role || '').toLowerCase();
+        if (role === 'assistant' && TASK_COMPLETE_REGEX.test(text)) {
+          completedAfterKickoff = true;
+        }
+      } catch {}
+    }
+
+    if (!kickoff) return empty;
+
+    if (completedAfterKickoff) {
+      return {
+        taskState: 'completed',
+        taskTitle: kickoff.title,
+        taskSinceTs: kickoff.ts || 0,
+        taskAgeMs: 0,
+        taskBlockedReason: ''
+      };
+    }
+
+    const sinceTs = kickoff.ts || toNum(fallbackUpdatedAt) || 0;
+    const ageMs = sinceTs > 0 ? Math.max(0, Date.now() - sinceTs) : 0;
+    const taskState = blockedReason ? 'blocked' : (ageMs > TASK_STALE_MS ? 'stale' : 'running');
+
+    return {
+      taskState,
+      taskTitle: kickoff.title,
+      taskSinceTs: sinceTs,
+      taskAgeMs: ageMs,
+      taskBlockedReason: blockedReason
+    };
+  } catch {
+    return empty;
+  }
+}
+
 function isSessionFile(f) { return f.endsWith('.jsonl') || f.includes('.jsonl.reset.'); }
 function extractSessionId(f) { return f.replace(/\.jsonl(?:\.reset\.\d+)?$/, ''); }
 
@@ -521,22 +637,32 @@ function getSessionsJson() {
   try {
     const sFile = path.join(sessDir, 'sessions.json');
     const data = JSON.parse(fs.readFileSync(sFile, 'utf8'));
-    return Object.entries(data).map(([key, s]) => ({
-      key,
-      label: s.label || resolveName(key),
-      model: s.modelOverride || s.model || '-',
-      totalTokens: s.totalTokens || 0,
-      contextTokens: s.contextTokens || 0,
-      kind: s.kind || (key.includes('group') ? 'group' : 'direct'),
-      updatedAt: s.updatedAt || 0,
-      createdAt: s.createdAt || s.updatedAt || 0,
-      aborted: s.abortedLastRun || false,
-      thinkingLevel: s.thinkingLevel || null,
-      channel: s.channel || '-',
-      sessionId: s.sessionId || '-',
-      lastMessage: getLastMessage(s.sessionId || key),
-      cost: getSessionCost(s.sessionId || key)
-    }));
+    return Object.entries(data).map(([key, s]) => {
+      const sessionId = s.sessionId || key;
+      const updatedAt = s.updatedAt || 0;
+      const task = getSessionTaskState(sessionId, updatedAt);
+      return {
+        key,
+        label: s.label || resolveName(key),
+        model: s.modelOverride || s.model || '-',
+        totalTokens: s.totalTokens || 0,
+        contextTokens: s.contextTokens || 0,
+        kind: s.kind || (key.includes('group') ? 'group' : 'direct'),
+        updatedAt,
+        createdAt: s.createdAt || s.updatedAt || 0,
+        aborted: s.abortedLastRun || false,
+        thinkingLevel: s.thinkingLevel || null,
+        channel: s.channel || '-',
+        sessionId: s.sessionId || '-',
+        lastMessage: getLastMessage(sessionId),
+        cost: getSessionCost(sessionId),
+        taskState: task.taskState,
+        taskTitle: task.taskTitle,
+        taskSinceTs: task.taskSinceTs,
+        taskAgeMs: task.taskAgeMs,
+        taskBlockedReason: task.taskBlockedReason
+      };
+    });
   } catch (e) { return []; }
 }
 

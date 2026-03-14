@@ -3217,6 +3217,8 @@ let sortBy = 'updated';
 let sortDir = 'desc';
 let selectedSessions = new Set();
 let notificationsEnabled = false;
+let stalledTaskToastState = new Map();
+const STALLED_TOAST_COOLDOWN_MS = 10 * 60 * 1000;
 
 document.querySelectorAll('.nav-item').forEach(item => {
   item.addEventListener('click', () => {
@@ -3324,12 +3326,55 @@ function updateDashboard() {
   try { updateLimits(); } catch(e) { console.error('Limits error:', e); }
   try { updateCosts(); } catch(e) { console.error('Costs error:', e); }
   try { updateStatusBar(); } catch(e) { console.error('StatusBar error:', e); }
+  try { checkStalledTaskToasts(); } catch(e) { console.error('Stalled toast error:', e); }
+}
+
+function checkStalledTaskToasts() {
+  const now = Date.now();
+  const activeToastKeys = new Set();
+
+  sessions.forEach(s => {
+    if (s.taskState !== 'stale') return;
+    const taskTitle = (s.taskTitle || '').trim();
+    const key = `${s.key}::${taskTitle}`;
+    activeToastKeys.add(key);
+
+    const lastToastTs = stalledTaskToastState.get(key) || 0;
+    if (now - lastToastTs < STALLED_TOAST_COOLDOWN_MS) return;
+
+    const mins = Math.max(1, Math.round((s.taskAgeMs || 0) / 60000));
+    const taskPart = taskTitle ? `: ${taskTitle}` : '';
+    showToast(`Task stalled in ${s.label} (${mins}m)${taskPart}`, 'warning', 7000);
+    stalledTaskToastState.set(key, now);
+  });
+
+  for (const key of Array.from(stalledTaskToastState.keys())) {
+    if (!activeToastKeys.has(key)) stalledTaskToastState.delete(key);
+  }
+}
+
+function getSessionStatusMeta(s, now = Date.now()) {
+  const age = now - (s.updatedAt || 0);
+  const isLive = age < 300000 && !s.aborted;
+  if (s.aborted) return { dot: '🔴', label: 'Aborted', color: 'var(--red)', className: 'aborted', highlightLive: false };
+
+  const taskState = s.taskState || 'none';
+  if (taskState === 'running') return { dot: '🟣', label: 'Background Running', color: 'var(--purple)', className: 'running', highlightLive: true };
+  if (taskState === 'blocked') {
+    const reason = s.taskBlockedReason === 'approval' ? ' (Approval)' : s.taskBlockedReason === 'rate_limit' ? ' (Rate Limit)' : '';
+    return { dot: '🟡', label: 'Background Blocked' + reason, color: 'var(--yellow)', className: '', highlightLive: true };
+  }
+  if (taskState === 'stale') return { dot: '🟠', label: 'Background Stalled', color: 'var(--yellow)', className: '', highlightLive: false };
+  if (taskState === 'completed') return { dot: '✅', label: 'Background Done', color: 'var(--green)', className: '', highlightLive: false };
+
+  if (isLive) return { dot: '🟢', label: 'Active', color: 'var(--green)', className: 'running', highlightLive: true };
+  return { dot: '⚪', label: 'Idle', color: 'var(--text-primary)', className: '', highlightLive: false };
 }
 
 function updateOverview() {
   const running = sessions.filter(s => {
-    const age = Date.now() - s.updatedAt;
-    return age < 300000 && !s.aborted;
+    const m = getSessionStatusMeta(s);
+    return m.highlightLive;
   }).length;
   
   animateValue(document.getElementById('runningAgents'), running);
@@ -3424,7 +3469,8 @@ function updateOverview() {
                 age < 86400000 ? Math.round(age / 3600000) + 'h ago' :
                 Math.round(age / 86400000) + 'd ago';
     
-    const isActive = age < 300000 && !s.aborted;
+    const statusMeta = getSessionStatusMeta(s);
+    const isActive = statusMeta.highlightLive;
     const typeClass = s.key.includes('subagent') ? 'sub' :
                       s.key.includes('cron') ? 'cron' :
                       s.kind === 'group' ? 'group' : 'main';
@@ -3448,7 +3494,7 @@ function updateOverview() {
         <div class="activity-dot ${isActive ? 'running' : ''}"></div>
         <div class="activity-content">
           <div class="activity-header">
-            <div style="display:flex;align-items:center;gap:6px"><span class="activity-name">${s.label}</span><span class="badge ${badgeText}">${badgeText}</span></div>
+            <div style="display:flex;align-items:center;gap:6px"><span class="activity-name">${s.label}</span><span class="badge ${badgeText}">${badgeText}</span><span style="font-size:10px;color:${statusMeta.color};font-weight:600;">${statusMeta.dot} ${statusMeta.label}</span></div>
             <span style="font-size:11px;color:var(--text-muted);flex-shrink:0">${ago}</span>
           </div>
           ${snippet ? `<div class="activity-snippet">${snippet}</div>` : ''}
@@ -3586,9 +3632,15 @@ function getFilteredSessions() {
   }
 
   if (sessionFilter === 'running') {
-    filtered = filtered.filter(s => now - s.updatedAt < 300000 && !s.aborted);
+    filtered = filtered.filter(s => {
+      const statusMeta = getSessionStatusMeta(s, now);
+      return statusMeta.highlightLive;
+    });
   } else if (sessionFilter === 'complete') {
-    filtered = filtered.filter(s => now - s.updatedAt >= 300000 && !s.aborted);
+    filtered = filtered.filter(s => {
+      const statusMeta = getSessionStatusMeta(s, now);
+      return !s.aborted && !statusMeta.highlightLive;
+    });
   } else if (sessionFilter === 'aborted') {
     filtered = filtered.filter(s => s.aborted);
   } else if (sessionFilter === 'subagent') {
@@ -3747,13 +3799,14 @@ function updateSessions() {
   const rowsHtml = sorted.map(s => {
     const age = Date.now() - s.updatedAt;
     const ago = age < 60000 ? 'just now' : age < 3600000 ? Math.round(age/60000)+'m ago' : age < 86400000 ? Math.round(age/3600000)+'h ago' : Math.round(age/86400000)+'d ago';
-    const isActive = age < 300000 && !s.aborted;
-    const statusClass = s.aborted ? 'aborted' : isActive ? 'running' : '';
-    const statusDot = s.aborted ? '🔴' : isActive ? '🟢' : '⚪';
+    const statusMeta = getSessionStatusMeta(s);
+    const statusClass = statusMeta.className;
+    const statusDot = statusMeta.dot;
     const typeClass = s.key.includes('subagent') ? 'sub' : s.key.includes('cron') ? 'cron' : s.kind === 'group' ? 'group' : 'main';
     const shortModel = s.model.split('/').pop();
     const modelColor = getModelColor(s.model);
-    const activeIndicator = isActive ? ' <span style="display:inline-flex;align-items:center;gap:3px;padding:1px 5px;background:rgba(16,185,129,0.15);color:var(--green);border-radius:4px;font-size:9px;font-weight:600;vertical-align:middle;">●&thinsp;LIVE</span>' : '';
+    const activeIndicator = statusMeta.highlightLive ? ' <span style="display:inline-flex;align-items:center;gap:3px;padding:1px 5px;background:rgba(16,185,129,0.15);color:var(--green);border-radius:4px;font-size:9px;font-weight:600;vertical-align:middle;">●&thinsp;LIVE</span>' : '';
+    const taskIndicator = (s.taskState && s.taskState !== 'none') ? ` <span style="display:inline-flex;align-items:center;gap:3px;padding:1px 5px;background:rgba(139,92,246,0.15);color:var(--purple);border-radius:4px;font-size:9px;font-weight:600;vertical-align:middle;">${statusDot}&thinsp;${statusMeta.label}</span>` : '';
     const costStr = s.cost > 0 ? '$' + s.cost.toFixed(2) : '-';
     const lastMsg = s.lastMessage ? s.lastMessage.substring(0, 60) + (s.lastMessage.length > 60 ? '…' : '') : '';
     const escapedKey = s.key.replace(/'/g, "\\'");
@@ -3764,7 +3817,7 @@ function updateSessions() {
         <div class="table-cell"><input type="checkbox" class="session-checkbox" ${checked} onchange="toggleSessionCompare('${escapedKey}', this.checked)" onclick="event.stopPropagation()"></div>
         <div class="table-cell" onclick="toggleSessionExpand('${escapedKey}', event)">${statusDot}</div>
         <div class="table-cell" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" onclick="toggleSessionExpand('${escapedKey}', event)">
-          <strong>${s.label}</strong>${activeIndicator}
+          <strong>${s.label}</strong>${activeIndicator}${taskIndicator}
         </div>
         <div class="table-cell" onclick="toggleSessionExpand('${escapedKey}', event)"><span class="badge ${typeClass}">${typeClass}</span></div>
         <div class="table-cell mono" style="color:${modelColor};" onclick="toggleSessionExpand('${escapedKey}', event)">${shortModel}</div>
@@ -5048,9 +5101,10 @@ function openSessionDetail(key) {
   document.getElementById('modalKey').textContent = s.key;
   const age = Date.now() - s.updatedAt;
   const ago = age < 60000 ? 'just now' : age < 3600000 ? Math.round(age/60000)+'m ago' : age < 86400000 ? Math.round(age/3600000)+'h ago' : Math.round(age/86400000)+'d ago';
-  const isActive = age < 300000 && !s.aborted;
+  const statusMeta = getSessionStatusMeta(s);
+  const taskDetail = s.taskTitle ? ` · ${s.taskTitle}` : '';
   document.getElementById('modalStats').innerHTML = `
-    <div><div style="font-size:11px;color:var(--text-muted);text-transform:uppercase;margin-bottom:4px;">Status</div><div style="font-weight:600;color:${isActive ? 'var(--green)' : 'var(--text-primary)'}">${isActive ? '🟢 Active' : s.aborted ? '🔴 Aborted' : '⚪ Idle'}</div></div>
+    <div><div style="font-size:11px;color:var(--text-muted);text-transform:uppercase;margin-bottom:4px;">Status</div><div style="font-weight:600;color:${statusMeta.color}">${statusMeta.dot} ${statusMeta.label}${taskDetail}</div></div>
     <div><div style="font-size:11px;color:var(--text-muted);text-transform:uppercase;margin-bottom:4px;">Model</div><div class="mono" style="font-size:13px;">${s.model.split('/').pop()}</div></div>
     <div><div style="font-size:11px;color:var(--text-muted);text-transform:uppercase;margin-bottom:4px;">Tokens</div><div class="mono" style="font-size:13px;">${(s.totalTokens||0).toLocaleString()}</div></div>
     <div><div style="font-size:11px;color:var(--text-muted);text-transform:uppercase;margin-bottom:4px;">Cost</div><div class="mono" style="font-size:13px;">$${(s.cost||0).toFixed(2)}</div></div>
