@@ -362,6 +362,7 @@ function httpsEnforcement(req, res) {
   if (process.env.DASHBOARD_ALLOW_HTTP === 'true') return true;
   const ip = getClientIP(req);
   if (isLocalhost(ip)) return true;
+  if (isTailscaleIP(ip)) return true;
   if (req.socket.encrypted || req.headers['x-forwarded-proto'] === 'https') return true;
   setSecurityHeaders(res);
   res.writeHead(403, { 'Content-Type': 'text/plain' });
