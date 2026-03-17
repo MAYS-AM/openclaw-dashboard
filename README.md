@@ -159,23 +159,28 @@ docker run -d \
   -e DASHBOARD_ALLOW_HTTP=true \
   -v ~/.openclaw:/home/node/.openclaw:ro \
   -v ~/.openclaw/workspace:/app/workspace \
+  -v openclaw-dashboard-data:/app/data \
   openclaw-dashboard
 ```
 
-For Docker management page access, pass the Docker socket:
+For Docker management and config editor access, pass the Docker socket and config file:
 
 ```bash
 docker run -d \
   --name openclaw-dashboard \
   -p 3001:3001 \
   -e WORKSPACE_DIR=/app/workspace \
+  -e OPENCLAW_CONFIG=/home/node/.openclaw/openclaw.json \
   -e DASHBOARD_ALLOW_HTTP=true \
-  -v ~/.openclaw:/home/node/.openclaw:ro \
+  -v ~/.openclaw:/home/node/.openclaw \
   -v ~/.openclaw/workspace:/app/workspace \
+  -v openclaw-dashboard-data:/app/data \
   -v /var/run/docker.sock:/var/run/docker.sock:ro \
   --group-add $(stat -c '%g' /var/run/docker.sock) \
   openclaw-dashboard
 ```
+
+> **Note:** The `data` volume persists credentials, audit logs and health history across restarts. Without it you'll need to re-register on every container recreation.
 
 ### Environment Variables
 

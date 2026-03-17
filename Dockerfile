@@ -7,13 +7,15 @@ WORKDIR /app
 COPY server.js index.html ./
 COPY scripts/ ./scripts/
 
-RUN chown -R node:node /app
+RUN mkdir -p /app/data && chown -R node:node /app
 
 USER node
 
 ENV NODE_ENV=production
 ENV DASHBOARD_PORT=3001
 ENV DASHBOARD_ALLOW_HTTP=true
+
+VOLUME ["/app/data"]
 
 EXPOSE 3001
 
