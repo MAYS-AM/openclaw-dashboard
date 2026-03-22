@@ -145,6 +145,38 @@ View logs:
 journalctl -u agent-dashboard -f
 ```
 
+### Docker
+
+```bash
+# Build
+docker build -t openclaw-dashboard .
+
+# Run
+docker run -d \
+  --name openclaw-dashboard \
+  -p 3001:3001 \
+  -e WORKSPACE_DIR=/app/workspace \
+  -e DASHBOARD_ALLOW_HTTP=true \
+  -v ~/.openclaw:/home/node/.openclaw:ro \
+  -v ~/.openclaw/workspace:/app/workspace \
+  openclaw-dashboard
+```
+
+For Docker management page access, pass the Docker socket:
+
+```bash
+docker run -d \
+  --name openclaw-dashboard \
+  -p 3001:3001 \
+  -e WORKSPACE_DIR=/app/workspace \
+  -e DASHBOARD_ALLOW_HTTP=true \
+  -v ~/.openclaw:/home/node/.openclaw:ro \
+  -v ~/.openclaw/workspace:/app/workspace \
+  -v /var/run/docker.sock:/var/run/docker.sock:ro \
+  --group-add $(stat -c '%g' /var/run/docker.sock) \
+  openclaw-dashboard
+```
+
 ### Environment Variables
 
 | Variable | Description | Default |
